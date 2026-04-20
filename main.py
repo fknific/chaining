@@ -1,7 +1,13 @@
 from langchain_ollama import ChatOllama
 from datetime import  datetime
 from langchain.tools import tool
+from langchain_openai import ChatOpenAI
 
+llm = ChatOpenAI(
+    base_url="http://your-vllm-server:8000/v1",
+    api_key="EMPTY",
+    model="gpt-oss:120b",
+)
 
 
 @tool
