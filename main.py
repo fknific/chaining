@@ -2,6 +2,16 @@ from langchain_ollama import ChatOllama
 from datetime import  datetime
 from langchain.tools import tool
 
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the current weather for a city."""
+    # Fake implementation for testing
+    return f"It's 18°C and sunny in {city}."
+
+
+
 llm = ChatOllama(base_url="http://192.168.178.70:11434",
     model="gpt-oss:20b",
     temperature=0.5
