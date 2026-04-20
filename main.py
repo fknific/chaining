@@ -47,6 +47,13 @@ messages2 = [
 
 ai_msg2 = llm2.invoke(messages2)
 
+if ai_msg2.tool_calls:
+    messages2.append(ai_msg2)
+    for tool_call in ai_msg2.tool_calls:
+        result = get_weather.invoke(tool_call)
+        messages2.append(result)
+    ai_msg2 = llm2.invoke(messages2)
+
 print(ai_msg.content)
 print(ai_msg2.content)
 
