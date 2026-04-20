@@ -1,23 +1,41 @@
 from langchain_ollama import ChatOllama
 from datetime import  datetime
+from langchain.tools import tool
 
-
-llm = ChatOllama(
-    model="qwen3.5:4b",
+llm = ChatOllama(base_url="http://192.168.178.70:11434",
+    model="gpt-oss:20b",
     temperature=0.5
 )
 
-
+llm2 = ChatOllama(base_url="http://192.168.178.70:11434",
+    model="gemma4:31b",
+    temperature=0.5
+)
 
 
 messages = [
     (
         "system",
-        "You are a helpful assistant that translates English to French. Translate the user sentence.",
+        "You are a helpful assistant that translates English to French. Translate the user sentence. and add one sentence",
     ),
     ("human", "I love programming."),
 ]
-ai_msg = llm.invoke(messages)
-print(ai_msg.content)
 
-print("a")
+
+ai_msg = llm.invoke(messages)
+
+
+messages2 = [
+    (
+        "system",
+        "You are a helpful assistant that translates English to German. Translate the user sentence.",
+    ),
+    ("human", ai_msg.content),
+]
+
+
+ai_msg2 = llm2.invoke(messages2)
+
+print(ai_msg.content)
+print(ai_msg2.content)
+
