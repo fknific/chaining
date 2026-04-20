@@ -3,11 +3,14 @@ from datetime import  datetime
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-llm = ChatOpenAI(
-    base_url="http://your-vllm-server:8000/v1",
+llm3 = ChatOpenAI(
+    base_url="http://192.168.178.13:8002/v1",
     api_key="EMPTY",
-    model="gpt-oss:120b",
+    model="openai/gpt-oss-120b",
 )
+
+testvllm = llm3.invoke("What is the current date and time?")
+print(testvllm)
 
 
 @tool
@@ -45,7 +48,7 @@ ai_msg = llm.invoke(messages)
 messages2 = [
     (
         "system",
-        "You are a helpful assistant that translates English to German. Translate the user sentence.",
+        "You are a helpful assistant that translates English to German. Translate the user sentence.also use the tools provided to answer any additional questions",
     ),
     ("human", ai_msg.content + "what is the weather like in berlin."),
 ]
