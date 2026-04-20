@@ -9,9 +9,9 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 # Model 1: vLLM for parsing raw scan output
 scanner_llm = ChatOpenAI(
-    base_url="http://your-vllm-server:8000/v1",
+    base_url="http://192.168.178.13:8002/v1",
     api_key="EMPTY",
-    model="gpt-oss:120b",
+    model="openai/gpt-oss-120b",
 )
 
 # Model 2: Ollama for pentest analysis (tools bound later)
@@ -64,81 +64,82 @@ async def main(target_ip: str):
     print(parsed.content)
 
     # Stage 2: pentest analysis using MetasploitMCP tools
-    async with MultiServerMCPClient({
+    mcp_client = MultiServerMCPClient({
         "metasploit": {
-            "url": "http://127.0.0.1:8080/sse",  # MetasploitMCP SSE endpoint
-            "transport": "sse",
+            "command": "/home/user/metasploit-mcp.sh",
+            "args": [],
+            "transport": "stdio",
         }
-    }) as mcp_client:
-        msf_tools = mcp_client.get_tools()
-        pentest_llm_with_tools = pentest_llm.bind_tools(msf_tools)
+    })
+    msf_tools = await mcp_client.get_tools()
+    pentest_llm_with_tools = pentest_llm.bind_tools(msf_tools)
 
-        tools_by_name = {t.name: t for t in msf_tools}
-        print(f"[*] Loaded {len(msf_tools)} Metasploit tools: "
-              f"{', '.join(tools_by_name.keys())}\n")
+    tools_by_name = {t.name: t for t in msf_tools}
+    print(f"[*] Loaded {len(msf_tools)} Metasploit tools: "
+          f"{', '.join(tools_by_name.keys())}\n")
 
-        pentest_msgs = [
-            SystemMessage(content=(
-                f"You are a penetration testing assistant supporting an authorized "
-                f"assessment against {target_ip}. You have full access to a Metasploit "
-                f"RPC backend through the provided tools. Your job:\n"
-                f"1. Search for relevant exploit and auxiliary modules for the services.\n"
-                f"2. Run auxiliary scanner modules to confirm vulnerabilities.\n"
-                f"3. If a check confirms vulnerability, run the matching exploit module "
-                f"with RHOSTS={target_ip} and an appropriate payload.\n"
-                f"4. After each exploit, list active sessions to verify success.\n"
-                f"5. When done, write a concise summary of confirmed vulnerabilities "
-                f"and any sessions obtained.\n\n"
-                f"Be methodical: one tool call at a time, observe each result, "
-                f"then decide the next step. Stop calling tools when you have "
-                f"enough evidence to write the summary."
-            )),
-            HumanMessage(content=(
-                f"Discovered services on {target_ip}:\n\n{parsed.content}\n\n"
-                f"Find applicable Metasploit modules, verify which vulnerabilities "
-                f"are real, and exploit them to confirm. Report what works."
-            )),
-        ]
+    pentest_msgs = [
+        SystemMessage(content=(
+            f"You are a penetration testing assistant supporting an authorized "
+            f"assessment against {target_ip}. You have full access to a Metasploit "
+            f"RPC backend through the provided tools. Your job:\n"
+            f"1. Search for relevant exploit and auxiliary modules for the services.\n"
+            f"2. Run auxiliary scanner modules to confirm vulnerabilities.\n"
+            f"3. If a check confirms vulnerability, run the matching exploit module "
+            f"with RHOSTS={target_ip} and an appropriate payload.\n"
+            f"4. After each exploit, list active sessions to verify success.\n"
+            f"5. When done, write a concise summary of confirmed vulnerabilities "
+            f"and any sessions obtained.\n\n"
+            f"Be methodical: one tool call at a time, observe each result, "
+            f"then decide the next step. Stop calling tools when you have "
+            f"enough evidence to write the summary."
+        )),
+        HumanMessage(content=(
+            f"Discovered services on {target_ip}:\n\n{parsed.content}\n\n"
+            f"Find applicable Metasploit modules, verify which vulnerabilities "
+            f"are real, and exploit them to confirm. Report what works."
+        )),
+    ]
 
-        # Agent loop: keep running tools until the LLM stops calling them
-        max_iterations = 15
-        for iteration in range(max_iterations):
-            print(f"\n[*] Agent iteration {iteration + 1}/{max_iterations}")
-            response = await pentest_llm_with_tools.ainvoke(pentest_msgs)
-            pentest_msgs.append(response)
+    # Agent loop: keep running tools until the LLM stops calling them
+    max_iterations = 15
+    for iteration in range(max_iterations):
+        print(f"\n[*] Agent iteration {iteration + 1}/{max_iterations}")
+        response = await pentest_llm_with_tools.ainvoke(pentest_msgs)
+        pentest_msgs.append(response)
 
-            if response.content:
-                print(f"[LLM] {response.content}")
+        if response.content:
+            print(f"[LLM] {response.content}")
 
-            if not response.tool_calls:
-                print("[*] No more tool calls — agent done.")
-                pentest_plan = response
-                break
-
-            for tool_call in response.tool_calls:
-                name = tool_call["name"]
-                args = tool_call["args"]
-                print(f"\n[TOOL] -> {name}({args})")
-
-                if name not in tools_by_name:
-                    result = f"ERROR: unknown tool {name}"
-                else:
-                    try:
-                        result = await tools_by_name[name].ainvoke(tool_call)
-                    except Exception as e:
-                        result = f"ERROR: {e}"
-
-                result_str = str(result)
-                preview = result_str[:500] + ("..." if len(result_str) > 500 else "")
-                print(f"[TOOL] <- {preview}")
-
-                pentest_msgs.append(ToolMessage(
-                    content=result_str,
-                    tool_call_id=tool_call["id"],
-                ))
-        else:
-            print(f"[!] Hit max iterations ({max_iterations}) — stopping.")
+        if not response.tool_calls:
+            print("[*] No more tool calls — agent done.")
             pentest_plan = response
+            break
+
+        for tool_call in response.tool_calls:
+            name = tool_call["name"]
+            args = tool_call["args"]
+            print(f"\n[TOOL] -> {name}({args})")
+
+            if name not in tools_by_name:
+                result = f"ERROR: unknown tool {name}"
+            else:
+                try:
+                    result = await tools_by_name[name].ainvoke(tool_call)
+                except Exception as e:
+                    result = f"ERROR: {e}"
+
+            result_str = str(result)
+            preview = result_str[:500] + ("..." if len(result_str) > 500 else "")
+            print(f"[TOOL] <- {preview}")
+
+            pentest_msgs.append(ToolMessage(
+                content=result_str,
+                tool_call_id=tool_call["id"],
+            ))
+    else:
+        print(f"[!] Hit max iterations ({max_iterations}) — stopping.")
+        pentest_plan = response
 
     print("\n[+] Stage 2 — Pentest analysis:\n")
     print(pentest_plan.content)
