@@ -21,6 +21,7 @@ llm2 = ChatOllama(base_url="http://192.168.178.70:11434",
     model="gemma4:31b",
     temperature=0.5
 )
+llm2.bind_tools([get_weather])
 
 
 messages = [
@@ -40,7 +41,7 @@ messages2 = [
         "system",
         "You are a helpful assistant that translates English to German. Translate the user sentence.",
     ),
-    ("human", ai_msg.content),
+    ("human", ai_msg.content + "what is the weather like in berlin."),
 ]
 
 
