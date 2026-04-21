@@ -3,36 +3,48 @@ import subprocess
 import sys
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 
-# Model 1: vLLM for parsing raw scan output
-scanner_llm = ChatOpenAI(
-    base_url="http://192.168.178.13:8002/v1",
-    api_key="EMPTY",
-    model="openai/gpt-oss-120b",
+# Model 1: Ollama for parsing raw scan output (simple extraction, no need for 120B)
+scanner_llm = ChatOllama(
+    base_url="http://192.168.178.70:11434",
+    model="qwen3.5:27b",
+    temperature=0.1,
 )
 
-# Model 2: Ollama for pentest analysis (tools bound later)
-pentest_llm = ChatOllama(
-    base_url="http://192.168.178.70:11434",
-    model="gpt-oss:20b",
+# Model 2: vLLM Qwen3-235B for pentest analysis - best tool calling capability
+pentest_llm = ChatOpenAI(
+    base_url="http://192.168.178.13:8003/v1",
+    api_key="EMPTY",
+    model="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     temperature=0.3,
 )
 
-# Model 3: Ollama for the final report
+# Model 3: Ollama for the final report (qwen3.5 follows constraints better than gemma4)
 report_llm = ChatOllama(
     base_url="http://192.168.178.70:11434",
-    model="gemma4:31b",
-    temperature=0.5,
+    model="qwen3.5:27b",
+    temperature=0.3,
 )
 
 
 def run_nmap(ip: str) -> str:
-    print(f"[*] Running nmap -sV -Pn against {ip} ...")
+    # -T4: aggressive timing (safe on LAN/same-rack)
+    # --min-rate 1000: don't drop below 1000 pkt/s
+    # -n: skip reverse DNS (saves per-host lookup)
+    # --version-intensity 5: slightly less thorough banner grabbing (default 7)
+    cmd = [
+        "nmap", "-sV", "-Pn", "-n",
+        "-T4", "--min-rate", "1000",
+        "--version-intensity", "5",
+        ip,
+    ]
+    print(f"[*] Running {' '.join(cmd)} ...")
     result = subprocess.run(
-        ["nmap", "-sV", "-Pn", ip],
+        cmd,
         capture_output=True,
         text=True,
         timeout=600,
@@ -72,7 +84,7 @@ async def main(target_ip: str):
         }
     })
     msf_tools = await mcp_client.get_tools()
-    pentest_llm_with_tools = pentest_llm.bind_tools(msf_tools)
+    pentest_llm_with_tools = pentest_llm.bind_tools(msf_tools, tool_choice="auto")
 
     tools_by_name = {t.name: t for t in msf_tools}
     print(f"[*] Loaded {len(msf_tools)} Metasploit tools: "
@@ -81,37 +93,48 @@ async def main(target_ip: str):
     pentest_msgs = [
         SystemMessage(content=(
             f"You are a penetration testing assistant supporting an authorized "
-            f"assessment against {target_ip}. You have full access to a Metasploit "
-            f"RPC backend through the provided tools. Your job:\n"
-            f"1. Search for relevant exploit and auxiliary modules for the services.\n"
-            f"2. Run auxiliary scanner modules to confirm vulnerabilities.\n"
-            f"3. If a check confirms vulnerability, run the matching exploit module "
-            f"with RHOSTS={target_ip} and an appropriate payload.\n"
-            f"4. After each exploit, list active sessions to verify success.\n"
-            f"5. When done, write a concise summary of confirmed vulnerabilities "
-            f"and any sessions obtained.\n\n"
-            f"Be methodical: one tool call at a time, observe each result, "
-            f"then decide the next step. Stop calling tools when you have "
-            f"enough evidence to write the summary."
+            f"assessment against {target_ip}. You have access to these Metasploit tools:\n"
+            f"- list_exploits(search_term): Search exploits by service name (e.g., 'proftpd', 'apache', 'samba')\n"
+            f"- run_auxiliary_module(module_name, options): Run scanner modules\n"
+            f"- run_exploit(module_name, options, payload): Run exploits\n"
+            f"- list_active_sessions(): Check if you got shells\n\n"
+            f"CRITICAL: Use 'module_name' parameter, NOT 'module_path'!\n"
+            f"Example: run_auxiliary_module(module_name='scanner/ftp/ftp_version', options={{'RHOSTS': '{target_ip}'}})\n\n"
+            f"Process:\n"
+            f"1. Search exploits for each service individually\n"
+            f"2. Try auxiliary scanners like 'scanner/ftp/ftp_version', 'scanner/ssh/ssh_version'\n"
+            f"3. If scanners find vulnerabilities, try relevant exploits from your search results\n"
+            f"4. Check for active sessions after each exploit\n"
+            f"5. Summarize what worked\n\n"
+            f"You found these exploits earlier - try scanning first, then exploit if promising:\n"
+            f"ProFTPD: proftpd_133c_backdoor, proftpd_modcopy_exec\n"
+            f"CUPS: cups_bash_env_exec, cups_ipp_remote_code_execution"
         )),
         HumanMessage(content=(
-            f"Discovered services on {target_ip}:\n\n{parsed.content}\n\n"
-            f"Find applicable Metasploit modules, verify which vulnerabilities "
-            f"are real, and exploit them to confirm. Report what works."
+            f"Target {target_ip} has these services:\n{parsed.content}\n\n"
+            f"Start by searching for exploits against each service individually."
         )),
     ]
 
     # Agent loop: keep running tools until the LLM stops calling them
-    max_iterations = 15
+    # High limit since this is local infrastructure - electricity isn't a concern
+    max_iterations = 50
     for iteration in range(max_iterations):
         print(f"\n[*] Agent iteration {iteration + 1}/{max_iterations}")
         response = await pentest_llm_with_tools.ainvoke(pentest_msgs)
+        print(f"[DEBUG] Raw response content: '{response.content}'")
+        print(f"[DEBUG] Tool calls: {response.tool_calls}")
         pentest_msgs.append(response)
 
         if response.content:
             print(f"[LLM] {response.content}")
 
         if not response.tool_calls:
+            if not response.content:
+                print("[!] Model returned empty content AND no tool calls — "
+                      "likely a tool-binding or server config issue.")
+                print(f"[!] additional_kwargs={response.additional_kwargs}")
+                print(f"[!] response_metadata={response.response_metadata}")
             print("[*] No more tool calls — agent done.")
             pentest_plan = response
             break
@@ -148,14 +171,19 @@ async def main(target_ip: str):
     report_msgs = [
         SystemMessage(content=(
             "You are a security report writer. Produce a short, professional "
-            "command-line report (under 300 words) summarizing the assessment "
-            "process, key findings, and recommended next steps."
+            "command-line report (under 300 words). STRICT RULES:\n"
+            "- Only report findings that appear verbatim in the tool outputs below.\n"
+            "- If no exploits were successfully verified, say so explicitly.\n"
+            "- Do not invent CVEs, dates, compromise indicators, or severity ratings "
+            "that are not present in the provided data.\n"
+            "- Clearly distinguish between 'confirmed exploitable' and 'potentially "
+            "vulnerable (not verified)'."
         )),
         HumanMessage(content=(
             f"Target: {target_ip}\n\n"
             f"Discovered services:\n{parsed.content}\n\n"
             f"Pentest analysis:\n{pentest_plan.content}\n\n"
-            "Write the final report."
+            "Write the final report. Only include facts from the data above."
         )),
     ]
     report = report_llm.invoke(report_msgs)
