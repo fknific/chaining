@@ -34,8 +34,12 @@ pentest_llm = ChatOpenAI(
 TOOL_OUTPUT_LIMIT = 2000
 MAX_HISTORY = 40
 MAX_ITERATIONS = 100
-MAX_CONCURRENT_MSF = 2
 MAX_AGENTS = 8
+MCP_POOL_SIZE = 8  # one dedicated MSF subprocess per agent slot
+
+_token_lock = asyncio.Lock()
+_total_input_tokens = 0
+_total_output_tokens = 0
 LPORTS = [443, 80, 8443, 8080, 8888, 9443, 9090, 9000]
 DISCOVERIES_FILE = "/home/user/PycharmProjects/chaining/discoveries.json"
 LOCK_FILE = DISCOVERIES_FILE + ".lock"
@@ -55,7 +59,6 @@ def service_rank(port_info: dict) -> int:
             return i
     return len(SERVICE_PRIORITY)
 
-_msf_semaphore: asyncio.Semaphore | None = None
 
 
 def get_local_ip(target: str) -> str:
@@ -234,6 +237,13 @@ async def run_agent_loop(
         response = await llm_with_tools.ainvoke(trimmed)
         msgs.append(response)
 
+        usage = (response.response_metadata or {}).get("token_usage") or {}
+        if usage:
+            async with _token_lock:
+                global _total_input_tokens, _total_output_tokens
+                _total_input_tokens += usage.get("prompt_tokens", 0)
+                _total_output_tokens += usage.get("completion_tokens", 0)
+
         if response.content:
             print(f"[{label}] {response.content}")
             final_content = response.content
@@ -253,11 +263,7 @@ async def run_agent_loop(
                 result_str = f"ERROR: unknown tool '{name}'"
             else:
                 try:
-                    if name == "save_discovery":
-                        result = await tools_by_name[name].ainvoke(tool_call)
-                    else:
-                        async with _msf_semaphore:
-                            result = await tools_by_name[name].ainvoke(tool_call)
+                    result = await tools_by_name[name].ainvoke(tool_call)
                     result_str = str(result)
                 except Exception as e:
                     result_str = f"ERROR: {e}"
@@ -276,8 +282,6 @@ async def run_agent_loop(
 
 
 async def main(target_ip: str):
-    global _msf_semaphore
-    _msf_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MSF)
 
     for path in (DISCOVERIES_FILE, LOCK_FILE):
         if os.path.exists(path):
@@ -311,20 +315,21 @@ async def main(target_ip: str):
 
     num_workers = min(MAX_AGENTS, len(ports))
     print(f"\n[*] {len(ports)} port(s) queued, processed by {num_workers} worker(s) "
-          f"(max {MAX_CONCURRENT_MSF} concurrent Metasploit operations)")
+          f"(each with a dedicated Metasploit subprocess)")
     print("    Priority order:")
     for p in ports:
         print(f"      [{p.get('port')}/{p.get('service')}] — {p.get('version', '')}")
 
-    mcp_client = MultiServerMCPClient({
+    mcp_cfg = {
         "metasploit": {
             "command": "/home/user/metasploit-mcp.sh",
             "args": [],
             "transport": "stdio",
         }
-    })
-    msf_tools = await mcp_client.get_tools()
-    print(f"\n[*] Loaded {len(msf_tools)} Metasploit tools from shared MCP subprocess\n")
+    }
+    mcp_clients = [MultiServerMCPClient(mcp_cfg) for _ in range(MCP_POOL_SIZE)]
+    msf_tools_pool = [await c.get_tools() for c in mcp_clients]
+    print(f"\n[*] Spawned {MCP_POOL_SIZE} MCP subprocesses ({len(msf_tools_pool[0])} tools each)\n")
 
     queue: asyncio.Queue = asyncio.Queue()
     for p in ports:
@@ -334,6 +339,7 @@ async def main(target_ip: str):
 
     async def worker(worker_id: int):
         lport = LPORTS[worker_id]
+        msf_tools = msf_tools_pool[worker_id % MCP_POOL_SIZE]
         while True:
             try:
                 port_info = queue.get_nowait()
@@ -384,11 +390,16 @@ async def main(target_ip: str):
         )),
     ]
     report = await util_llm.ainvoke(report_msgs)
+    usage = (report.response_metadata or {}).get("token_usage") or {}
+    _total_input_tokens += usage.get("prompt_tokens", 0)
+    _total_output_tokens += usage.get("completion_tokens", 0)
+
     print("\n" + "=" * 60)
     print("FINAL REPORT")
     print("=" * 60)
     print(report.content)
     print("=" * 60)
+    print(f"\n[TOKEN USAGE] Input: {_total_input_tokens:,}  Output: {_total_output_tokens:,}  Total: {_total_input_tokens + _total_output_tokens:,}")
 
 
 if __name__ == "__main__":
