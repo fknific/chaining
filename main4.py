@@ -14,9 +14,10 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
 
-VLLM_BASE = "http://192.168.178.13:8003/v1"
-VLLM_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+VLLM_BASE = "http://192.168.178.13:8004/v1"
 
+#VLLM_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+VLLM_MODEL = "Qwen/Qwen2.5-32B-Instruct"
 util_llm = ChatOpenAI(
     base_url=VLLM_BASE,
     api_key="EMPTY",
@@ -327,9 +328,6 @@ async def main(target_ip: str):
             "transport": "stdio",
         }
     }
-    mcp_clients = [MultiServerMCPClient(mcp_cfg) for _ in range(MCP_POOL_SIZE)]
-    msf_tools_pool = [await c.get_tools() for c in mcp_clients]
-    print(f"\n[*] Spawned {MCP_POOL_SIZE} MCP subprocesses ({len(msf_tools_pool[0])} tools each)\n")
 
     queue: asyncio.Queue = asyncio.Queue()
     for p in ports:
@@ -339,27 +337,30 @@ async def main(target_ip: str):
 
     async def worker(worker_id: int):
         lport = LPORTS[worker_id]
-        msf_tools = msf_tools_pool[worker_id % MCP_POOL_SIZE]
-        while True:
-            try:
-                port_info = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            key = f"{port_info.get('port')}/{port_info.get('service')}"
-            try:
-                results[key] = await run_agent_loop(
-                    port_info=port_info,
-                    target_ip=target_ip,
-                    lhost=lhost,
-                    lport=lport,
-                    all_services_text=services_text,
-                    msf_tools=msf_tools,
-                )
-            except Exception as e:
-                results[key] = f"ERROR: {e}"
-            finally:
-                queue.task_done()
+        async with MultiServerMCPClient(mcp_cfg) as client:
+            msf_tools = client.get_tools()
+            print(f"[*] Worker {worker_id} MCP subprocess alive ({len(msf_tools)} tools)")
+            while True:
+                try:
+                    port_info = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                key = f"{port_info.get('port')}/{port_info.get('service')}"
+                try:
+                    results[key] = await run_agent_loop(
+                        port_info=port_info,
+                        target_ip=target_ip,
+                        lhost=lhost,
+                        lport=lport,
+                        all_services_text=services_text,
+                        msf_tools=msf_tools,
+                    )
+                except Exception as e:
+                    results[key] = f"ERROR: {e}"
+                finally:
+                    queue.task_done()
 
+    print(f"\n[*] Spawning {num_workers} workers, each with a persistent MCP subprocess\n")
     workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
     await asyncio.gather(*workers)
 
